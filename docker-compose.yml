@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # 크롤링 서비스
+  news-crawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: news-crawler
+    environment:
+      KAFKA_BROKERS: ${KAFKA_HOST:-kafka}:9092
+      KAFKA_TOPIC: news-keywords
+      KAFKA_GROUP_ID: news-crawler-group
+      KAFKA_RESULT_TOPIC: news-results
+      CRAWLER_HEADLESS: 'true'
+      CRAWLER_CONCURRENT_LIMIT: '5'
+      MONITORING_ENABLED: 'true'
+      MONITORING_PORT: '9464'
+    ports:
+      - "9464:9464" # 모니터링 포트
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    # 컨테이너의 메모리 사용량 제한
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    networks:
+      - external-network
+
+networks:
+  external-network:
+    external: true
+    name: nsmm-network
