@@ -5,7 +5,7 @@ import {
 	recordCrawlingSuccess,
 	recordMemoryUsage,
 } from "@/monitoring/metrics";
-import type { CrawlOptions, SearchResult } from "@/types";
+import type { CrawlOptions, SearchResult, NewsItem } from "@/types";
 import { logger } from "@/utils/logger";
 import type { Page } from "puppeteer";
 /**
@@ -13,9 +13,11 @@ import type { Page } from "puppeteer";
  * Puppeteer 브라우저 인스턴스를 효율적으로 관리하는 클러스터 제공
  */
 import { Cluster } from "puppeteer-cluster";
-import { ErrorType, type RetryOptions } from "./base-crawler";
-import type { CrawlerRegistry } from "./crawler-registry";
-import { CrawlerError } from "./crawler-service";
+import { ErrorType, CrawlerError } from "@/types";
+import type { RetryOptions } from "@/core/base-crawler";
+import type { CrawlerRegistry } from "@/core/crawler-registry";
+import type { NewsCrawler } from '@/core/crawler.interface';
+import type { Logger } from 'winston';
 
 /**
  * 크롤링 작업 데이터 인터페이스
@@ -23,7 +25,7 @@ import { CrawlerError } from "./crawler-service";
 interface CrawlTask {
 	source: string;
 	keyword: string;
-	period: string;
+	period?: string;
 	options?: CrawlOptions;
 }
 
@@ -54,7 +56,7 @@ export class CrawlerCluster {
 	 */
 	constructor(
 		registry: CrawlerRegistry,
-		customRetryOptions?: Partial<RetryOptions>,
+		customRetryOptions?: Partial<RetryOptions>
 	) {
 		this.registry = registry;
 		this.concurrentLimit = env.crawler.concurrentLimit;
@@ -63,7 +65,7 @@ export class CrawlerCluster {
 			...customRetryOptions,
 		};
 		logger.debug(
-			`크롤러 클러스터 인스턴스 생성됨 (동시성 제한: ${this.concurrentLimit}, 최대 재시도: ${this.retryOptions.maxRetries})`,
+			`크롤러 클러스터 인스턴스 생성됨 (동시성 제한: ${this.concurrentLimit}, 최대 재시도: ${this.retryOptions.maxRetries})`
 		);
 	}
 
@@ -109,11 +111,11 @@ export class CrawlerCluster {
 			this.cluster.on("taskerror", (err, data) => {
 				const errorMessage = err instanceof Error ? err.message : String(err);
 				const errorType = this.detectErrorType(
-					err instanceof Error ? err : new Error(errorMessage),
+					err instanceof Error ? err : new Error(errorMessage)
 				);
 				logger.error(
 					`클러스터 작업 오류 발생: ${data.source}, 키워드: ${data.keyword}, 오류 유형: ${errorType}`,
-					err,
+					err
 				);
 			});
 
@@ -151,7 +153,7 @@ export class CrawlerCluster {
 				if (heapUsedMB > 1000) {
 					// 1GB 이상일 때
 					logger.warn(
-						`높은 메모리 사용량 감지: 클러스터, 힙 사용: ${heapUsedMB}MB/${heapTotalMB}MB`,
+						`높은 메모리 사용량 감지: 클러스터, 힙 사용: ${heapUsedMB}MB/${heapTotalMB}MB`
 					);
 
 					// 가비지 컬렉션 강제 실행 시도
@@ -196,14 +198,14 @@ export class CrawlerCluster {
 		switch (errorType) {
 			case ErrorType.NETWORK:
 				// 네트워크 오류는 더 오래 기다림
-				factor = factor * 1.5;
+				factor *= 1.5;
 				break;
 			case ErrorType.TIMEOUT:
 				// 타임아웃은 기본 지수 백오프 사용
 				break;
 			case ErrorType.SELECTOR:
 				// 셀렉터 오류는 짧게 재시도
-				factor = factor * 0.8;
+				factor *= 0.8;
 				break;
 			default:
 				// 기본 지수 백오프 사용
@@ -264,7 +266,7 @@ export class CrawlerCluster {
 	 * 클러스터 종료
 	 */
 	public async close(): Promise<void> {
-		if (!this.initialized || !this.cluster) {
+		if (!(this.initialized && this.cluster)) {
 			return;
 		}
 
@@ -297,150 +299,113 @@ export class CrawlerCluster {
 	 */
 	private async executeTask(
 		page: Page,
-		task: CrawlTask,
+		task: CrawlTask
 	): Promise<SearchResult> {
 		const { source, keyword, period, options } = task;
+		logger.info(
+			`클러스터 작업 실행: ${source}, 키워드: "${keyword}", 기간: ${period || '전체'}`
+		);
 		const startTime = Date.now();
 
-		logger.info(
-			`클러스터에서 작업 시작: 소스 ${source}, 키워드 "${keyword}", 기간 ${period}`,
-		);
-		recordCrawlingStart(source);
-
 		try {
-			// 성능 최적화: 불필요한 리소스 차단
-			await page.setRequestInterception(true);
-			page.on("request", (request) => {
-				const resourceType = request.resourceType();
-				if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
-					request.abort();
-				} else {
-					request.continue();
-				}
-			});
-
 			const crawler = this.registry.getCrawler(source);
 			if (!crawler) {
-				const error = `크롤러를 찾을 수 없습니다: ${source}`;
-				logger.error(error);
-				recordCrawlingFailure(source, (Date.now() - startTime) / 1000);
-				throw new CrawlerError(error, source, keyword, period);
-			}
-
-			// 페이지 설정
-			await page.setUserAgent(env.crawler.userAgent);
-			await page.setDefaultTimeout(env.crawler.timeout);
-
-			// 크롤러별 URL 생성 및 페이지 이동
-			let searchUrl = "";
-			if (source === "naver") {
-				const periodMap: Record<string, string> = {
-					"1d": "1d",
-					"1w": "1w",
-					"1m": "1m",
-					"3m": "3m",
-					"6m": "6m",
-					"1y": "1y",
-					all: "all",
-				};
-				const periodValue = periodMap[period] || "all";
-				searchUrl = env.crawler.naverNewsSearchUrlFormat
-					.replace("{keyword}", encodeURIComponent(keyword))
-					.replace("{period}", periodValue)
-					.replace("{period_value}", periodValue);
-			} else if (source === "google-news") {
-				searchUrl = env.crawler.googleNewsRssUrlFormat.replace(
-					"{keyword}",
-					encodeURIComponent(keyword),
+				throw new CrawlerError(
+					`클러스터 작업: 크롤러를 찾을 수 없습니다: ${source}`,
+					source,
+					keyword,
+					ErrorType.UNKNOWN
 				);
-			} else {
-				// 기타 소스에 대한 로직 추가
-				logger.debug(`커스텀 소스 ${source}에 대한 URL 생성 시도`);
 			}
 
-			logger.debug(`${source} 뉴스 검색 URL: ${searchUrl}`);
-
-			if (searchUrl) {
-				await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
-			} else {
-				logger.warn(`소스 ${source}에 대한 검색 URL을 생성할 수 없습니다.`);
-			}
-
-			// 검색 작업 수행
 			const result = await crawler.searchNews(keyword, period, options);
 
 			const durationSeconds = (Date.now() - startTime) / 1000;
-			logger.info(
-				`클러스터 작업 완료: 소스 ${source}, ${result.newsItems.length}개 항목 (소요시간: ${durationSeconds.toFixed(2)}초)`,
-			);
 			recordCrawlingSuccess(source, durationSeconds, result.newsItems.length);
-
+			logger.info(
+				`클러스터 작업 완료: ${source}, 키워드: "${keyword}", 기간: ${result.period || '전체'}, ${result.newsItems.length}개 항목 (${durationSeconds.toFixed(2)}초)`
+			);
 			return result;
 		} catch (error) {
 			const durationSeconds = (Date.now() - startTime) / 1000;
+			recordCrawlingFailure(source, durationSeconds);
+
 			const errorMessage =
 				error instanceof Error ? error.message : String(error);
 			const errorType = this.detectErrorType(
-				error instanceof Error ? error : new Error(errorMessage),
+				error instanceof Error ? error : new Error(errorMessage)
 			);
 
 			logger.error(
-				`클러스터 작업 실패: 소스 ${source}, 키워드 "${keyword}" (소요시간: ${durationSeconds.toFixed(2)}초): ${errorMessage}, 오류 유형: ${errorType}`,
+				`클러스터 작업 실패: ${source}, 키워드: "${keyword}", 기간: ${period || '전체'}, 오류: ${errorMessage}`,
+				error
 			);
-			recordCrawlingFailure(source, durationSeconds);
 
-			if (error instanceof CrawlerError) {
-				throw error;
-			}
-			throw new CrawlerError(
-				`소스 ${source}에서 검색 중 오류 발생: ${errorMessage}`,
-				source,
-				keyword,
-				period,
-			);
+			// 오류를 다시 throw하여 puppeteer-cluster의 재시도 로직이 작동하도록 함
+			throw new CrawlerError(errorMessage, source, keyword, errorType);
 		}
 	}
 
 	/**
-	 * 뉴스 검색 메서드
+	 * 특정 소스에 대한 뉴스 검색 요청 (클러스터 사용)
 	 * @param source - 크롤러 소스 이름
 	 * @param keyword - 검색 키워드
-	 * @param period - 검색 기간
+	 * @param period - 검색 기간 (선택적)
 	 * @param options - 검색 옵션
 	 * @returns 검색 결과
 	 */
 	public async searchNews(
 		source: string,
 		keyword: string,
-		period: string,
-		options?: CrawlOptions,
+		period?: string,
+		options?: CrawlOptions
 	): Promise<SearchResult> {
 		if (!this.initialized || !this.cluster) {
 			await this.initialize();
 		}
 
 		if (!this.cluster) {
-			throw new Error("클러스터가 초기화되지 않았습니다.");
+			const errorMsg = "크롤러 클러스터가 초기화되지 않았습니다.";
+			logger.error(errorMsg);
+			return {
+				keyword,
+				period,
+				timestamp: new Date().toISOString(),
+				newsItems: [],
+				source,
+				error: errorMsg,
+			};
 		}
 
-		const task: CrawlTask = { source, keyword, period, options };
+		logger.info(
+			`클러스터에 작업 추가: ${source}, 키워드: "${keyword}", 기간: ${period || '전체'}`
+		);
 
 		try {
-			return await this.cluster.execute(task);
-		} catch (error) {
-			const errorMessage =
-				error instanceof Error ? error.message : String(error);
-			logger.error(`클러스터 실행 실패: ${errorMessage}`);
-
-			if (error instanceof CrawlerError) {
-				throw error;
-			}
-			throw new CrawlerError(
-				`소스 ${source}에서 검색 중 오류 발생: ${errorMessage}`,
+			const result = await this.cluster.execute({
 				source,
 				keyword,
 				period,
+				options,
+			});
+			return result;
+		} catch (error) {
+			const errorMessage =
+				error instanceof Error ? error.message : String(error);
+			logger.error(
+				`클러스터 작업 실행 중 오류 발생: ${source}, 키워드: "${keyword}", 기간: ${period || '전체'}, 오류: ${errorMessage}`,
+				error
 			);
+
+			// 오류 발생 시 빈 결과 반환 (period 포함)
+			return {
+				keyword,
+				period,
+				timestamp: new Date().toISOString(),
+				newsItems: [],
+				source,
+				error: errorMessage,
+			};
 		}
 	}
 
@@ -468,7 +433,7 @@ export class CrawlerCluster {
 			}
 		} else {
 			logger.info(
-				`동시성 제한이 ${limit}로 설정됨 (클러스터가 아직 초기화되지 않음)`,
+				`동시성 제한이 ${limit}로 설정됨 (클러스터가 아직 초기화되지 않음)`
 			);
 		}
 	}
@@ -486,7 +451,7 @@ export class CrawlerCluster {
 	 * @returns 활성 작업 수
 	 */
 	public getActiveTaskCount(): number {
-		if (!this.initialized || !this.cluster) {
+		if (!(this.initialized && this.cluster)) {
 			return 0;
 		}
 

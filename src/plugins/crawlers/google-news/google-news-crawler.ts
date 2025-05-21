@@ -1,6 +1,6 @@
 import { config } from "@/config/config";
 import { BaseCrawler } from "@/core/base-crawler";
-import type { CrawlOptions, NewsItem, PeriodMap, SearchResult } from "@/types";
+import type { CrawlOptions, NewsItem, SearchResult } from "@/types";
 import { NewsSource } from "@/types";
 import { logger } from "@/utils/logger";
 /**
@@ -11,15 +11,6 @@ import axios from "axios";
 import { parseStringPromise } from "xml2js";
 
 /**
- * 검색 기간 매핑
- */
-const PERIOD_MAP: PeriodMap = {
-	"1w": { pd: "1w", value: "1w" }, // 1주일
-	"1m": { pd: "1m", value: "1m" }, // 1개월
-	all: { pd: "all", value: "all" }, // 전체기간
-};
-
-/**
  * 구글 뉴스 크롤러 구현 클래스
  */
 export class GoogleNewsCrawler extends BaseCrawler {
@@ -28,6 +19,7 @@ export class GoogleNewsCrawler extends BaseCrawler {
 	 */
 	constructor() {
 		super(NewsSource.GOOGLE_NEWS);
+		logger.debug("구글 뉴스 크롤러 인스턴스 생성");
 	}
 
 	/**
@@ -49,32 +41,36 @@ export class GoogleNewsCrawler extends BaseCrawler {
 	/**
 	 * 검색 URL 생성
 	 * @param keyword - 검색 키워드
-	 * @param period - 검색 기간
 	 * @returns 검색 URL
 	 */
-	protected buildSearchUrl(keyword: string, period: string): string {
-		return config.crawler.googleNewsRssUrlFormat.replace(
+	protected buildSearchUrl(keyword: string): string {
+		const url = config.crawler.googleNewsRssUrlFormat.replace(
 			"{keyword}",
-			encodeURIComponent(keyword),
+			encodeURIComponent(keyword)
 		);
+		return url;
 	}
 
 	/**
 	 * 구글 뉴스 검색
 	 * @param keyword - 검색 키워드
-	 * @param period - 검색 기간
+	 * @param period - 검색 기간 (예: "1w", "1m", "all"). RSS는 기간 필터링을 직접 지원하지 않으므로, 가져온 결과에서 필터링.
 	 * @param options - 검색 옵션
 	 * @returns 검색 결과
 	 */
 	public async searchNews(
 		keyword: string,
-		period: string,
-		options: CrawlOptions = {},
+		period?: string,
+		options: CrawlOptions = {}
 	): Promise<SearchResult> {
-		logger.info(`구글 뉴스 검색: 키워드 "${keyword}", 기간 ${period}`);
+		const timestamp = new Date().toISOString();
+		const targetPeriod = period === "all" ? undefined : period;
+		logger.info(
+			`구글 뉴스 검색: 키워드 \"${keyword}\" (기간: ${targetPeriod || '전체'})`
+		);
 
-		const maxItems = options.maxItems || 20;
-		const url = this.buildSearchUrl(keyword, period);
+		const maxItems = options.maxItems || 100;
+		const url = this.buildSearchUrl(keyword);
 
 		try {
 			logger.debug(`구글 뉴스 RSS 요청: ${url}`);
@@ -88,24 +84,85 @@ export class GoogleNewsCrawler extends BaseCrawler {
 
 			// XML을 파싱하여 뉴스 아이템 추출
 			const xmlData = response.data;
-			const newsItems = await this.extractNewsItemsFromGoogleNewsRSS(
+			const allFetchedItems = await this.extractNewsItemsFromGoogleNewsRSS(
 				xmlData,
-				maxItems,
+				maxItems
 			);
 
-			logger.info(`구글 뉴스 검색 완료: ${newsItems.length}개 항목 추출`);
+			logger.info(`구글 뉴스 RSS에서 ${allFetchedItems.length}개 항목 추출 완료`);
+
+			// 기간 필터링 적용
+			const periodStartDate = this.parsePeriod(targetPeriod);
+			let filteredItems = allFetchedItems;
+
+			if (periodStartDate) {
+				filteredItems = allFetchedItems.filter(item => {
+					try {
+						const itemDate = new Date(item.publishedAt);
+						return itemDate >= periodStartDate;
+					} catch (e) {
+						logger.warn(`[${this.getSource()}] 뉴스 항목 날짜 파싱 오류: ${item.publishedAt}. 필터링에서 제외.`);
+						return false;
+					}
+				});
+				logger.info(`기간(${targetPeriod}) 필터링 적용: ${allFetchedItems.length}개 -> ${filteredItems.length}개`);
+			}
 
 			return {
 				keyword,
-				period,
-				timestamp: new Date().toISOString(),
-				newsItems,
+				period: targetPeriod,
+				timestamp,
+				newsItems: filteredItems,
 				source: this.getSource(),
 			};
 		} catch (error) {
 			logger.error("구글 뉴스 RSS 크롤링 중 오류", error);
-			throw error;
+			return {
+				keyword,
+				period: targetPeriod,
+				timestamp,
+				newsItems: [],
+				source: this.getSource(),
+				error: error instanceof Error ? error.message : String(error),
+			};
 		}
+	}
+
+	/**
+	 * 기간 문자열을 파싱하여 시작 날짜 Date 객체로 반환
+	 * @param period - 기간 문자열 (예: "1w", "1m", "3d") 또는 undefined
+	 * @returns 시작 날짜 Date 객체 또는 null (기간 지정 없을 시)
+	 */
+	private parsePeriod(period?: string): Date | null {
+		if (!period) return null;
+
+		const now = new Date();
+		const regex = /^(\d+)([wdm])$/;
+		const match = period.match(regex);
+
+		if (!match) {
+			logger.warn(`[${this.getSource()}] 유효하지 않은 기간 형식: ${period}. 기간 필터링을 적용하지 않습니다.`);
+			return null;
+		}
+
+		const value = Number.parseInt(match[1], 10);
+		const unit = match[2];
+
+		switch (unit) {
+			case 'd':
+				now.setDate(now.getDate() - value);
+				break;
+			case 'w':
+				now.setDate(now.getDate() - value * 7);
+				break;
+			case 'm':
+				now.setMonth(now.getMonth() - value);
+				break;
+			default:
+				return null;
+		}
+		now.setHours(0, 0, 0, 0); 
+		return now;
 	}
 
 	/**
@@ -116,7 +173,7 @@ export class GoogleNewsCrawler extends BaseCrawler {
 	 */
 	private async extractNewsItemsFromGoogleNewsRSS(
 		xmlData: string,
-		maxItems: number,
+		maxItems: number
 	): Promise<NewsItem[]> {
 		try {
 			const result = await parseStringPromise(xmlData, {
@@ -143,7 +200,9 @@ export class GoogleNewsCrawler extends BaseCrawler {
 			for (let i = 0; i < count; i++) {
 				const item = items[i];
 
-				if (!item.title || !item.link) continue;
+				if (!(item.title && item.link)) {
+					continue;
+				}
 
 				// RSS description에서 뉴스 출처 정보 추출
 				let press = "";
@@ -170,14 +229,16 @@ export class GoogleNewsCrawler extends BaseCrawler {
 				}
 
 				// 발행 시간 추출
-				const publishedAt = item.pubDate || new Date().toISOString();
+				const publishedAt = item.pubDate
+					? new Date(item.pubDate).toISOString()
+					: new Date().toISOString();
 
 				newsItems.push({
 					title: item.title,
 					url: item.link,
 					press,
 					publishedAt,
-					summary,
+					description: summary,
 				});
 			}
 

@@ -26,14 +26,14 @@ export interface NewsCrawler {
 	 * 주어진 키워드와 기간으로 뉴스를 검색
 	 *
 	 * @param keyword - 검색할 키워드
-	 * @param period - 검색 기간 (1d, 1w, 1m, all 등)
+	 * @param period - 검색 기간 (선택적)
 	 * @param options - 추가 검색 옵션
 	 * @returns 검색 결과
 	 */
 	searchNews(
 		keyword: string,
-		period: string,
-		options?: CrawlOptions,
+		period?: string,
+		options?: CrawlOptions
 	): Promise<SearchResult>;
 
 	/**

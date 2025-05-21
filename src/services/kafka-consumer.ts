@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { env } from "@/config/env";
-import { ErrorType } from "@/crawlers/base-crawler";
-import { CrawlerError, type CrawlerService } from "@/crawlers/crawler-service";
+import { ErrorType, CrawlerError, type DeadLetterQueueMessage } from "@/types";
 import type { CrawlRequest, SearchResult } from "@/types";
 /**
  * Kafka 소비자 서비스
@@ -12,6 +11,7 @@ import { logger } from "@/utils/logger";
 import { Kafka } from "kafkajs";
 import type { Consumer, EachMessagePayload, KafkaMessage } from "kafkajs";
 import type { KafkaProducerService } from "./kafka-producer";
+import type { CrawlerService } from "@/core/crawler-service";
 
 // 오류 유형별 재시도 여부 정의
 interface ErrorPolicy {
@@ -29,17 +29,6 @@ const ERROR_POLICY_MAP: Record<ErrorType, ErrorPolicy> = {
 	[ErrorType.BROWSER]: { shouldRetry: true, maxRetries: 2, backoff: 5000 },
 	[ErrorType.UNKNOWN]: { shouldRetry: false, maxRetries: 0, backoff: 0 },
 };
-
-/**
- * 데드 레터 큐에 보낼 메시지 타입
- */
-interface DeadLetterMessage {
-	originalRequest: CrawlRequest;
-	error: unknown;
-	source?: string;
-	retryCount?: number;
-	errorType?: ErrorType;
-}
 
 /**
  * Kafka 소비자 서비스 클래스
@@ -71,7 +60,7 @@ export class KafkaConsumerService {
 	 */
 	constructor(
 		crawlerService: CrawlerService,
-		producerService: KafkaProducerService,
+		producerService: KafkaProducerService
 	) {
 		this.crawlerService = crawlerService;
 		this.producerService = producerService;
@@ -125,11 +114,11 @@ export class KafkaConsumerService {
 	 * 만료된 메시지 ID 정리
 	 */
 	private cleanupExpiredMessageIds(): void {
-		const initialSize = this.processedMessageIds.size;
+		const _initialSize = this.processedMessageIds.size;
 		// 현재는 setTimeout으로 자동 정리되지만,
 		// 추가 정리 로직이 필요한 경우 여기에 구현
 		logger.debug(
-			`메시지 ID 캐시 상태: ${this.processedMessageIds.size}개 항목`,
+			`메시지 ID 캐시 상태: ${this.processedMessageIds.size}개 항목`
 		);
 	}
 
@@ -139,91 +128,117 @@ export class KafkaConsumerService {
 	 * @returns 오류 유형
 	 */
 	private detectErrorType(error: Error | unknown): ErrorType {
-		if (error instanceof CrawlerError) {
-			// CrawlerError는 이미 내부적으로 유형이 결정되어 있음
-			return ErrorType.UNKNOWN; // 기본값
+		if (error instanceof CrawlerError && error.errorType) {
+			return error.errorType;
 		}
 
-		const errorMessage =
-			error instanceof Error
-				? error.message.toLowerCase()
-				: String(error).toLowerCase();
+		if (error instanceof Error) {
+			const errorMessage = error.message.toLowerCase();
 
-		if (
-			errorMessage.includes("net::") ||
-			errorMessage.includes("network") ||
-			errorMessage.includes("connection") ||
-			errorMessage.includes("econnrefused")
-		) {
-			return ErrorType.NETWORK;
+			if (
+				errorMessage.includes("net::") ||
+				errorMessage.includes("network") ||
+				errorMessage.includes("connection") ||
+				errorMessage.includes("econnrefused")
+			) {
+				return ErrorType.NETWORK;
+			}
+
+			if (
+				errorMessage.includes("timeout") ||
+				errorMessage.includes("timed out")
+			) {
+				return ErrorType.TIMEOUT;
+			}
+
+			if (
+				errorMessage.includes("selector") ||
+				errorMessage.includes("element not found")
+			) {
+				return ErrorType.SELECTOR;
+			}
+
+			if (errorMessage.includes("parse") || errorMessage.includes("parsing")) {
+				return ErrorType.PARSING;
+			}
+
+			// Puppeteer 관련 오류 메시지 추가
+			if (
+				errorMessage.includes("navigation failed") ||
+				errorMessage.includes("protocol error") ||
+				errorMessage.includes("target closed")
+			) {
+				return ErrorType.BROWSER;
+			}
 		}
-
-		if (
-			errorMessage.includes("timeout") ||
-			errorMessage.includes("timed out")
-		) {
-			return ErrorType.TIMEOUT;
-		}
-
-		if (
-			errorMessage.includes("selector") ||
-			errorMessage.includes("element not found")
-		) {
-			return ErrorType.SELECTOR;
-		}
-
-		if (errorMessage.includes("parse") || errorMessage.includes("parsing")) {
-			return ErrorType.PARSING;
-		}
-
-		if (
-			errorMessage.includes("browser") ||
-			errorMessage.includes("puppeteer")
-		) {
-			return ErrorType.BROWSER;
-		}
-
-		return ErrorType.UNKNOWN;
+		return ErrorType.UNKNOWN; // 기본값
 	}
 
 	/**
 	 * 데드 레터 큐로 메시지 전송
-	 * @param message - 데드 레터 메시지
+	 * @param originalRequest - 원본 크롤링 요청
+	 * @param error - 발생한 오류
+	 * @param source - 오류가 발생한 소스 (선택적)
+	 * @param retryCount - 재시도 횟수 (선택적)
+	 * @param errorType - 오류 유형 (선택적)
 	 */
 	private async sendToDeadLetterQueue(
-		message: DeadLetterMessage,
+		params: {
+			originalRequest: CrawlRequest;
+			error: unknown;
+			source?: string;
+			retryCount?: number;
+			errorType?: ErrorType;
+		}
 	): Promise<void> {
 		try {
-			// SearchResult 형식으로 변환하여 데드 레터 메시지 전송
-			// 에러 정보는 빈 배열의 뉴스 아이템으로 표현하고 로그로 기록
-			const errorMessage =
-				message.error instanceof Error
-					? message.error.message
-					: String(message.error);
+			const { originalRequest, error, source, retryCount, errorType } = params;
+			const messageId = this.generateMessageId(originalRequest);
+			const detectedErrorType = errorType || this.detectErrorType(error);
+			const policy = ERROR_POLICY_MAP[detectedErrorType];
+			
+			// 오류 메시지와 스택 트레이스 추출
+			let errorMessage: string;
+			let stackTrace: string | undefined;
+			
+			if (error instanceof Error) {
+				errorMessage = error.message;
+				stackTrace = error.stack;
+			} else if (typeof error === 'object' && error !== null && 'error' in error && typeof error.error === 'string') {
+				// SearchResult 타입의 에러 객체인 경우
+				errorMessage = error.error;
+			} else {
+				errorMessage = String(error);
+			}
 
-			const source = message.source || "unknown";
-			const period = message.originalRequest.periods.join(",");
-
-			// 데드 레터 큐용 SearchResult 객체 생성
-			const deadLetterResult: SearchResult = {
-				keyword: message.originalRequest.keyword,
-				source,
-				period,
+			// Dead Letter Queue 메시지 생성
+			const deadLetterMessage: DeadLetterQueueMessage = {
+				id: messageId,
 				timestamp: new Date().toISOString(),
-				newsItems: [], // 에러 케이스는 빈 배열
+				originalRequest,
+				errorType: detectedErrorType,
+				errorMessage,
+				stackTrace,
+				retryCount: retryCount || 0,
+				maxRetries: policy.maxRetries,
+				source: source || 'unknown',
+				status: 'failed'
 			};
 
-			// 로그에 에러 정보 기록
 			logger.warn(
-				`데드 레터 메시지: 키워드 "${message.originalRequest.keyword}", 소스 ${source}, 에러: ${errorMessage}, 재시도: ${message.retryCount || 0}회`,
+				`데드 레터 메시지 생성: 키워드 "${originalRequest.keyword}", 오류 유형: ${detectedErrorType}, 소스: ${deadLetterMessage.source}, 재시도: ${deadLetterMessage.retryCount}/${deadLetterMessage.maxRetries}`
 			);
 
-			// 결과 발행
-			await this.producerService.publishResult(deadLetterResult);
+			// 전용 DLQ 토픽으로 메시지 발행
+			const success = await this.producerService.publishDeadLetterMessage(deadLetterMessage);
 
-			logger.info(`메시지가 데드 레터 큐(${this.deadLetterTopic})로 전송됨`);
+			if (success) {
+				logger.info(`메시지 ID ${messageId}가 데드 레터 큐(${this.deadLetterTopic})로 전송됨`);
+			} else {
+				logger.error(`데드 레터 큐(${this.deadLetterTopic})로 메시지 전송 실패`);
+			}
 		} catch (error) {
-			logger.error("데드 레터 큐로 메시지 전송 실패", error);
+			logger.error("데드 레터 큐로 메시지 전송 중 예외 발생", error);
 		}
 	}
 
@@ -247,7 +262,7 @@ export class KafkaConsumerService {
 
 		try {
 			logger.info(
-				`메시지 수신: ${topic}-${partition}, 오프셋: ${message.offset}`,
+				`메시지 수신: ${topic}-${partition}, 오프셋: ${message.offset}`
 			);
 
 			// JSON 메시지를 CrawlRequest로 파싱
@@ -257,7 +272,7 @@ export class KafkaConsumerService {
 			const messageId = this.generateMessageId(request);
 			if (this.processedMessageIds.has(messageId)) {
 				logger.info(
-					`중복 메시지 감지됨, 처리 건너뜀: ${messageId} (키워드: ${request.keyword})`,
+					`중복 메시지 감지됨, 처리 건너뜀: ${messageId} (키워드: ${request.keyword})`
 				);
 				// 중복 메시지는 처리하지 않고 커밋만 수행
 				await this.commitOffset(topic, partition, message);
@@ -265,13 +280,24 @@ export class KafkaConsumerService {
 			}
 
 			logger.info(
-				`크롤링 요청 처리 중: 키워드 "${request.keyword}", 기간 ${request.periods.join(", ")}`,
+				`크롤링 요청 처리 중: 키워드 "${request.keyword}", 기간 ${request.periods.join(", ")}`
 			);
 
 			// 크롤링 요청 처리
 			try {
-				const { results, errors } =
+				const allResults: SearchResult[] =
 					await this.crawlerService.processCrawlRequest(request);
+
+				const results: SearchResult[] = [];
+				const errors: SearchResult[] = [];
+
+				for (const res of allResults) {
+					if (res.error) {
+						errors.push(res);
+					} else {
+						results.push(res);
+					}
+				}
 
 				// 결과 전송
 				if (results.length > 0) {
@@ -285,16 +311,18 @@ export class KafkaConsumerService {
 					logger.warn(`${errors.length}개 소스에서 오류 발생: ${errorSources}`);
 
 					// 영구적 오류가 발생한 경우 데드레터 큐로 전송
-					for (const error of errors) {
-						const errorType = this.detectErrorType(error);
+					for (const errorResult of errors) {
+						const errorObject = new Error(errorResult.error || "Unknown error");
+						const errorType = this.detectErrorType(errorObject);
 						const policy = ERROR_POLICY_MAP[errorType];
 
 						if (!policy.shouldRetry) {
 							// 재시도할 수 없는 영구적 오류는 데드레터 큐로 전송
 							await this.sendToDeadLetterQueue({
 								originalRequest: request,
-								error,
-								source: error.source,
+								error: errorResult,
+								source: errorResult.source,
+								errorType
 							});
 						}
 					}
@@ -316,7 +344,7 @@ export class KafkaConsumerService {
 					const backoff = policy.backoff * (retryCount + 1); // 지수 백오프
 
 					logger.warn(
-						`메시지 처리 실패 (${errorType}), ${backoff}ms 후 재시도 (${retryCount + 1}/${policy.maxRetries}): ${messageId}`,
+						`메시지 처리 실패 (${errorType}), ${backoff}ms 후 재시도 (${retryCount + 1}/${policy.maxRetries}): ${messageId}`
 					);
 
 					// 메시지를 커밋하지 않고 종료
@@ -376,7 +404,7 @@ export class KafkaConsumerService {
 	private async commitOffset(
 		topic: string,
 		partition: number,
-		message: KafkaMessage,
+		message: KafkaMessage
 	): Promise<void> {
 		try {
 			await this.consumer.commitOffsets([
@@ -414,14 +442,14 @@ export class KafkaConsumerService {
 			});
 
 			// 백프레셔 관리를 위한 정기 확인 간격 설정
-			const backpressureInterval = setInterval(() => {
+			const _backpressureInterval = setInterval(() => {
 				if (
 					this.pendingMessages > this.MAX_PENDING_MESSAGES &&
 					!this.isProcessingPaused
 				) {
 					this.isProcessingPaused = true;
 					logger.warn(
-						`메시지 처리 일시 중지, 대기 중 메시지: ${this.pendingMessages}`,
+						`메시지 처리 일시 중지, 대기 중 메시지: ${this.pendingMessages}`
 					);
 					this.consumer.pause([{ topic: env.kafka.topic }]);
 				}

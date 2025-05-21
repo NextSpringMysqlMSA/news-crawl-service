@@ -17,7 +17,16 @@ export const config = {
 		headless: env.crawler.headless,
 		userAgent: env.crawler.userAgent,
 		timeout: env.crawler.timeout,
-		naverNewsSearchUrlFormat: env.crawler.naverNewsSearchUrlFormat,
+		concurrentLimit: env.crawler.concurrentLimit,
+		maxItemsPerKeyword: env.crawler.maxItemsPerKeyword,
+		pageLoadTimeoutMs: env.crawler.pageLoadTimeoutMs,
+		postLoadDelayMs: env.crawler.postLoadDelayMs,
 		googleNewsRssUrlFormat: env.crawler.googleNewsRssUrlFormat,
+		naverNewsSearchUrlFormat: env.crawler.naverNewsSearchUrlFormat,
+	},
+	monitoring: {
+		enabled: env.monitoring.enabled,
+		port: env.monitoring.port,
+		path: env.monitoring.path,
 	},
 };

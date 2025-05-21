@@ -12,9 +12,9 @@ import {
 
 // 검색 기간 매핑
 const PERIOD_MAP: PeriodMap = {
-	"1w": { pd: "1", value: "1w" }, // 1주일
-	"1m": { pd: "2", value: "1m" }, // 1개월
-	all: { pd: "0", value: "all" }, // 전체기간
+	// "1w": { pd: "1", value: "1w" }, // 1주일 - 제거
+	// "1m": { pd: "2", value: "1m" }, // 1개월 - 제거
+	// all: { pd: "0", value: "all" }, // 전체기간 - 제거
 };
 
 export class NaverNewsCrawler {
@@ -64,16 +64,19 @@ export class NaverNewsCrawler {
 	/**
 	 * 검색 URL 생성
 	 */
-	private buildSearchUrl(keyword: string, period: string): string {
-		const periodInfo = PERIOD_MAP[period];
-		if (!periodInfo) {
-			throw new Error(`Invalid period: ${period}`);
-		}
+	private buildSearchUrl(keyword: string /*, period: string */): string { // period 제거
+		// const periodInfo = PERIOD_MAP[period]; // 제거
+		// if (!periodInfo) { // 제거
+		// 	throw new Error(`Invalid period: ${period}`); // 제거
+		// } // 제거
 
 		return env.crawler.naverNewsSearchUrlFormat
 			.replace("{keyword}", encodeURIComponent(keyword))
-			.replace("{period}", periodInfo.pd)
-			.replace("{period_value}", periodInfo.value);
+			// .replace("{period}", periodInfo.pd) // 제거
+			// .replace("{period_value}", periodInfo.value); // 제거
+			// 기간 관련 URL 파라미터가 필요하다면 기본값 설정 또는 수정 필요
+			// 예시: .replace("{period}", "0").replace("{period_value}", "all")
+			// 여기서는 임시로 삭제 처리.
 	}
 
 	/**
@@ -81,11 +84,11 @@ export class NaverNewsCrawler {
 	 */
 	async searchNews(
 		keyword: string,
-		period: string,
-		options: CrawlOptions = {},
+		// period: string, - 제거
+		options: CrawlOptions = {}
 	): Promise<SearchResult> {
 		const maxItems = options.maxItems || 20;
-		const url = this.buildSearchUrl(keyword, period);
+		const url = this.buildSearchUrl(keyword /*, period */); // period 제거
 
 		const page = await this.createPage();
 		try {
@@ -95,14 +98,12 @@ export class NaverNewsCrawler {
 				await page.waitForSelector(".list_news .bx", {
 					timeout: env.crawler.timeout / 2,
 				});
-			} catch (error) {
+			} catch (_error) {
 				await page
 					.waitForSelector(".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2", {
 						timeout: env.crawler.timeout / 2,
 					})
-					.catch(() => {
-						console.log("기본 뉴스 리스트 요소를 찾을 수 없습니다.");
-					});
+					.catch(() => {});
 			}
 
 			await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -113,7 +114,7 @@ export class NaverNewsCrawler {
 				const hasDetailFormat = await page.evaluate(() => {
 					return (
 						document.querySelectorAll(
-							".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2",
+							".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2"
 						).length > 0
 					);
 				});
@@ -125,7 +126,7 @@ export class NaverNewsCrawler {
 
 			return {
 				keyword,
-				period,
+				// period, - 제거
 				timestamp: new Date().toISOString(),
 				newsItems,
 				source: "naver",

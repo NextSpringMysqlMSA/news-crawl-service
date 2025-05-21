@@ -1,237 +1,272 @@
-import { config } from "@/config/config";
-import { BaseCrawler } from "@/core/base-crawler";
-import type { CrawlOptions, NewsItem, PeriodMap, SearchResult } from "@/types";
-import { NewsSource } from "@/types";
+/**
+ * 네이버 뉴스 API 기반 크롤러 구현체
+ */
+import axios, { type AxiosInstance } from "axios";
+import { env } from "@/config/env";
+import type {
+	CrawlOptions,
+	NewsCrawler,
+	NewsItem,
+	NaverNewsApiItem,
+	NaverNewsApiResponse,
+	SearchResult,
+} from "@/types";
 import { logger } from "@/utils/logger";
-/**
- * 네이버 뉴스 크롤러
- * 네이버 뉴스 검색 페이지에서 뉴스 기사를 크롤링합니다.
- */
-import type { Page } from "puppeteer";
+import { NewsSource } from "@/types"; // NewsSource enum import 추가
 
 /**
- * 검색 기간 매핑
+ * 네이버 뉴스 API 크롤러
+ * NewsCrawler 인터페이스를 구현합니다.
  */
-const PERIOD_MAP: PeriodMap = {
-	"1d": { pd: "4", value: "1d" }, // 1일
-	"1w": { pd: "1", value: "1w" }, // 1주일
-	"1m": { pd: "2", value: "1m" }, // 1개월
-	"3m": { pd: "3", value: "3m" }, // 3개월
-	all: { pd: "0", value: "all" }, // 전체기간
-};
+export class NaverCrawler implements NewsCrawler {
+	private readonly source: string = NewsSource.NAVER;
+	private apiClient: AxiosInstance;
+	private readonly clientId: string;
+	private readonly clientSecret: string;
 
-/**
- * 네이버 뉴스 크롤러 구현 클래스
- */
-export class NaverNewsCrawler extends BaseCrawler {
-	/**
-	 * 생성자
-	 */
 	constructor() {
-		super(NewsSource.NAVER);
-	}
+		this.clientId = env.naver.clientId;
+		this.clientSecret = env.naver.clientSecret;
 
-	/**
-	 * 검색 URL 생성
-	 * @param keyword - 검색 키워드
-	 * @param period - 검색 기간
-	 * @returns 검색 URL
-	 */
-	protected buildSearchUrl(keyword: string, period: string): string {
-		const periodInfo = PERIOD_MAP[period];
-		if (!periodInfo) {
+		if (!this.clientId || !this.clientSecret) {
 			throw new Error(
-				`유효하지 않은 기간: ${period}, 유효한 기간: ${Object.keys(PERIOD_MAP).join(", ")}`,
+				"Naver API 클라이언트 ID 또는 시크릿이 설정되지 않았습니다."
 			);
 		}
 
-		return config.crawler.naverNewsSearchUrlFormat
-			.replace("{keyword}", encodeURIComponent(keyword))
-			.replace("{period}", periodInfo.pd)
-			.replace("{period_value}", periodInfo.value);
+		this.apiClient = axios.create({
+			baseURL: "https://openapi.naver.com",
+			headers: {
+				"X-Naver-Client-Id": this.clientId,
+				"X-Naver-Client-Secret": this.clientSecret,
+				Accept: "application/json", // JSON 응답 선호
+			},
+			timeout: 10000, // 10초 타임아웃 설정
+		});
+		logger.debug(`${this.source} 크롤러(API) 인스턴스 생성됨`);
 	}
 
 	/**
-	 * 네이버 뉴스 검색
+	 * 초기화 메서드 (API 클라이언트는 생성자에서 초기화되므로 비워둠)
+	 */
+	public async initialize(): Promise<void> {
+		logger.info(`${this.source} 크롤러(API) 초기화 완료 (별도 작업 없음)`);
+		// API 클라이언트는 생성자에서 이미 설정됨
+		return Promise.resolve();
+	}
+
+	/**
+	 * 종료 메서드 (별도 리소스 해제 필요 없음)
+	 */
+	public async close(): Promise<void> {
+		logger.info(`${this.source} 크롤러(API) 종료 완료 (별도 작업 없음)`);
+		// 특별히 해제할 리소스 없음
+		return Promise.resolve();
+	}
+
+	/**
+	 * 네이버 뉴스 API를 호출하여 뉴스 검색 (페이징 및 기간 처리 포함)
 	 * @param keyword - 검색 키워드
-	 * @param period - 검색 기간
-	 * @param options - 검색 옵션
-	 * @returns 검색 결과
+	 * @param period - 검색 기간 (예: "1w", "1m", "all", 선택적). 'all' 또는 미지정 시 기간 필터링 안 함.
+	 * @param options - 크롤링 옵션 (maxItems는 전체 최대 항목 수로 사용)
+	 * @returns 검색 결과 Promise
 	 */
 	public async searchNews(
 		keyword: string,
-		period: string,
-		options: CrawlOptions = {},
+		period?: string, // period 파라미터 추가
+		options?: CrawlOptions
 	): Promise<SearchResult> {
-		logger.info(`네이버 뉴스 검색: 키워드 "${keyword}", 기간 ${period}`);
+		const timestamp = new Date().toISOString();
+		// period가 'all'이면 null로 처리하여 기간 필터링 안 함
+		const targetPeriod = period === "all" ? undefined : period;
+		
+		logger.info(
+			`[${this.source}] 키워드 "${keyword}" 뉴스 검색 시작... (기간: ${targetPeriod || '전체'})`
+		);
 
-		const maxItems = options.maxItems || 20;
-		const url = this.buildSearchUrl(keyword, period);
+		const allNewsItems: NewsItem[] = [];
+		const display = 100; // API는 한 번에 최대 100개까지 요청 가능
+		let currentStart = 1;
+		const maxApiResults = 1000; // 네이버 API 최대 검색 결과 제한
+		const maxItemsToCollect = options?.maxItems ?? maxApiResults; // 전체 수집할 최대 아이템 수
 
-		const page = await this.createPage();
+		// 기간 문자열을 시작 날짜로 변환하는 로직 (나중에 추가)
+		const periodStartDate = this.parsePeriod(targetPeriod); 
+
 		try {
-			logger.debug(`URL 접속: ${url}`);
-			await page.goto(url, { waitUntil: "domcontentloaded" });
+			while (allNewsItems.length < maxItemsToCollect) {
+				logger.debug(`[${this.source}] 페이지 요청: start=${currentStart}, display=${display}`);
+				const response = await this.apiClient.get<NaverNewsApiResponse>(
+					"/v1/search/news.json",
+					{
+						params: {
+							query: keyword,
+							display: display,
+							start: currentStart,
+							sort: "date", // 날짜순으로 정렬
+						},
+					}
+				);
 
-			// 페이지가 완전히 로드될 때까지 대기
-			try {
-				await page.waitForSelector(".list_news .bx", {
-					timeout: config.crawler.timeout / 2,
-				});
-				logger.debug("기본 뉴스 리스트 요소 찾음");
-			} catch (error) {
-				// 기본 셀렉터가 없으면 대체 셀렉터 확인
-				await page
-					.waitForSelector(".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2", {
-						timeout: config.crawler.timeout / 2,
-					})
-					.catch(() => {
-						logger.warn("기본 또는 상세 뉴스 리스트 요소를 찾을 수 없음");
-					});
-			}
+				const apiResult = response.data;
+				const fetchedItems = apiResult.items.map(this.mapApiItemToNewsItem);
 
-			// 잠시 대기하여 페이지 완전히 로드되도록 함
-			await new Promise((resolve) => setTimeout(resolve, 1000));
-
-			// 뉴스 항목 추출 - 기본 리스트 형식 사용
-			let newsItems = await this.extractNewsItemsFromNaverList(page, maxItems);
-
-			// 상세 형식 추출 시도 (리스트 형식이 비어있거나 상세 형식이 있는 경우)
-			if (newsItems.length === 0) {
-				// 상세 뉴스 항목 선택자 확인
-				const hasDetailFormat = await page.evaluate(() => {
-					return (
-						document.querySelectorAll(
-							".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2",
-						).length > 0
-					);
-				});
-
-				if (hasDetailFormat) {
-					logger.debug("상세 뉴스 형식 발견, 상세 형식으로 추출 시도");
-					newsItems = await this.extractNewsItemsFromNaverDetailFormat(
-						page,
-						maxItems,
-					);
+				if (fetchedItems.length === 0) {
+					logger.debug(`[${this.source}] API에서 더 이상 항목을 반환하지 않음. 페이징 종료.`);
+					break; // 더 이상 가져올 아이템이 없으면 종료
 				}
+
+				let oldestNewsInPage: Date | null = null;
+
+				for (const item of fetchedItems) {
+					// 기간 필터링: periodStartDate가 있고, 아이템 날짜가 그 이전이면 중단
+					const itemDate = new Date(item.publishedAt);
+					if (periodStartDate && itemDate < periodStartDate) {
+						logger.debug(`[${this.source}] 기간(${targetPeriod}) 이전 뉴스 발견(${item.publishedAt}). 해당 페이지 처리 중단.`);
+						oldestNewsInPage = itemDate; // 해당 페이지에서 가장 오래된 뉴스로 기록하고 루프 탈출
+						break; 
+					}
+					
+					// 최대 수집 개수 도달 시 중단
+					if (allNewsItems.length < maxItemsToCollect) {
+						allNewsItems.push(item);
+					} else {
+						break; // 내부 루프 탈출
+					}
+				}
+
+				// 최대 수집 개수에 도달했거나, 기간을 벗어난 뉴스를 발견했다면 페이징 종료
+				if (allNewsItems.length >= maxItemsToCollect || oldestNewsInPage) {
+					logger.debug(`[${this.source}] 최대 수집 개수(${maxItemsToCollect}) 도달 또는 기간(${targetPeriod}) 벗어남. 페이징 종료.`);
+					break;
+				}
+
+				// 다음 페이지 시작 위치 계산 및 API 제한 확인
+				const nextStart = apiResult.start + apiResult.items.length; // API가 반환한 실제 아이템 수 기준
+				if (nextStart > maxApiResults || nextStart >= apiResult.total) {
+                    logger.debug(`[${this.source}] API 최대 제한(${maxApiResults}) 또는 전체 결과(${apiResult.total}) 도달. 페이징 종료.`);
+					break; // API 제한(1000) 또는 전체 결과 수 도달 시 종료
+				}
+				
+				currentStart = nextStart;
+
+				// 짧은 딜레이 추가 (API 호출 제한 방지) - 필요시 조절
+				await new Promise(resolve => setTimeout(resolve, 100)); 
 			}
 
-			logger.info(`네이버 뉴스 검색 완료: ${newsItems.length}개 항목 추출`);
+			logger.info(
+				`[${this.source}] 키워드 "${keyword}" 검색 완료. ${allNewsItems.length}개 항목 수집.`
+			);
 
 			return {
 				keyword,
-				period,
-				timestamp: new Date().toISOString(),
-				newsItems,
-				source: this.getSource(),
+				period: targetPeriod, // 결과에 기간 정보 포함
+				timestamp,
+				newsItems: allNewsItems,
+				source: this.source,
 			};
 		} catch (error) {
-			logger.error("네이버 뉴스 크롤링 중 오류 발생", error);
-			throw error;
-		} finally {
-			await page.close();
+			// 실패 시 빈 결과를 반환하되, 오류 메시지를 포함 (기존 오류 처리 로직 활용)
+			let errorMessage = `[${this.source}] 키워드 "${keyword}" ${targetPeriod ? `(기간: ${targetPeriod}) ` : ""}검색 중 오류 발생`;
+			if (axios.isAxiosError(error)) {
+				if (error.response) {
+					// 네이버 API 오류 응답 처리
+					const { status, data } = error.response;
+					errorMessage += ` - ${status} ${data?.errorMessage || error.message}`;
+					logger.error(errorMessage, { errorData: data });
+				} else {
+					// 네트워크 오류 등
+					errorMessage += ` - ${error.message}`;
+					logger.error(errorMessage);
+				}
+			} else {
+				errorMessage += ` - ${(error as Error).message}`;
+				logger.error(errorMessage, { error });
+			}
+			
+			return {
+				keyword,
+				period: targetPeriod, // 오류 시에도 기간 정보 포함
+				timestamp,
+				newsItems: [],
+				source: this.source,
+				error: errorMessage,
+			};
 		}
 	}
 
 	/**
-	 * 기본 리스트 형식에서 뉴스 항목 추출
-	 * @param page - Puppeteer 페이지 객체
-	 * @param maxItems - 최대 추출 항목 수
-	 * @returns 뉴스 항목 배열
+	 * 기간 문자열을 파싱하여 시작 날짜 Date 객체로 반환
+	 * @param period - 기간 문자열 (예: "1w", "1m", "3d") 또는 undefined
+	 * @returns 시작 날짜 Date 객체 또는 null (기간 지정 없을 시)
 	 */
-	private async extractNewsItemsFromNaverList(
-		page: Page,
-		maxItems: number,
-	): Promise<NewsItem[]> {
-		return await page.evaluate((max) => {
-			const items: NewsItem[] = [];
-			const newsElements = document.querySelectorAll(".list_news .bx");
+	private parsePeriod(period?: string): Date | null {
+		if (!period) return null;
 
-			for (let i = 0; i < Math.min(newsElements.length, max); i++) {
-				const element = newsElements[i];
+		const now = new Date();
+		const regex = /^(\d+)([wdm])$/; // 숫자 + (w, d, m)
+		const match = period.match(regex);
 
-				const titleElement = element.querySelector(".news_tit");
-				if (!titleElement) continue;
+		if (!match) {
+			logger.warn(`[${this.source}] 유효하지 않은 기간 형식: ${period}. 기간 필터링을 적용하지 않습니다.`);
+			return null;
+		}
 
-				const title = titleElement.textContent?.trim() || "";
-				const url = titleElement.getAttribute("href") || "";
+		const value = Number.parseInt(match[1], 10);
+		const unit = match[2];
 
-				const pressElement = element.querySelector(".press");
-				const press = pressElement
-					? pressElement.textContent?.trim() || ""
-					: "";
-
-				const timeElement = element.querySelector(
-					".info_group .time, .info_group span:last-child",
-				);
-				const publishedAt = timeElement
-					? timeElement.textContent?.trim() || ""
-					: "";
-
-				const summaryElement = element.querySelector(
-					".dsc_wrap .api_txt_lines",
-				);
-				const summary = summaryElement
-					? summaryElement.textContent?.trim() || ""
-					: "";
-
-				items.push({ title, url, press, publishedAt, summary });
-			}
-
-			return items;
-		}, maxItems);
+		switch (unit) {
+			case 'd':
+				now.setDate(now.getDate() - value);
+				break;
+			case 'w':
+				now.setDate(now.getDate() - value * 7);
+				break;
+			case 'm':
+				now.setMonth(now.getMonth() - value);
+				break;
+			default:
+				return null; // Should not happen due to regex
+		}
+		// 계산된 날짜의 시작 시간(00:00:00)으로 설정
+		now.setHours(0, 0, 0, 0); 
+		return now;
 	}
 
 	/**
-	 * 상세 형식에서 뉴스 항목 추출
-	 * @param page - Puppeteer 페이지 객체
-	 * @param maxItems - 최대 추출 항목 수
-	 * @returns 뉴스 항목 배열
+	 * 크롤러 소스 이름 반환
+	 * @returns 크롤러 소스 이름 ("naver")
 	 */
-	private async extractNewsItemsFromNaverDetailFormat(
-		page: Page,
-		maxItems: number,
-	): Promise<NewsItem[]> {
-		return await page.evaluate((max) => {
-			const items: NewsItem[] = [];
-			const newsElements = document.querySelectorAll(
-				".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2",
-			);
-
-			for (let i = 0; i < Math.min(newsElements.length, max); i++) {
-				const element = newsElements[i];
-
-				const titleElement = element.querySelector(
-					'a[data-cr-area="nws*l.head"]',
-				);
-				if (!titleElement) continue;
-
-				const title = titleElement.textContent?.trim() || "";
-				const url = titleElement.getAttribute("href") || "";
-
-				const pressElement = element.querySelector("span.hsL8fD_XoXuP6VV4EQ9O");
-				const press = pressElement
-					? pressElement.textContent?.trim() || ""
-					: "";
-
-				const timeElement = element.querySelector(
-					"span.pb0WkYzTHKfRU8YzP_l4.k4nH8M9eFZGHV1k_IzG3",
-				);
-				const publishedAt = timeElement
-					? timeElement.textContent?.trim() || ""
-					: "";
-
-				const summaryElement = element.querySelector(
-					"div.QBgQWBsVXoH7dY0vBJ0W",
-				);
-				const summary = summaryElement
-					? summaryElement.textContent?.trim() || ""
-					: "";
-
-				items.push({ title, url, press, publishedAt, summary });
-			}
-
-			return items;
-		}, maxItems);
+	public getSource(): string {
+		return this.source;
 	}
-}
+
+	/**
+	 * Naver API 아이템을 내부 NewsItem 형식으로 변환
+	 * @param apiItem - NaverNewsApiItem 객체
+	 * @returns NewsItem 객체
+	 */
+	private mapApiItemToNewsItem(apiItem: NaverNewsApiItem): NewsItem {
+		// HTML 태그 제거 함수
+		const removeHtmlTags = (str: string) => str.replace(/<\/?b>/g, "");
+
+		// 날짜 형식 변환 (RFC 1123 GMT -> ISO 8601)
+		let publishedAt = apiItem.pubDate;
+		try {
+			publishedAt = new Date(apiItem.pubDate).toISOString();
+		} catch (e) {
+			logger.warn(
+				`[${NewsSource.NAVER}] 날짜 변환 실패: ${apiItem.pubDate}. 원본 형식 유지.`
+			);
+		}
+
+		return {
+			title: removeHtmlTags(apiItem.title),
+			url: apiItem.link, // 네이버 뉴스 링크를 기본 URL로 사용
+			originalUrl: apiItem.originallink,
+			publishedAt: publishedAt,
+			description: removeHtmlTags(apiItem.description),
+			press: undefined, // API에서 언론사 정보 직접 제공 안 함
+		};
+	}
+} 

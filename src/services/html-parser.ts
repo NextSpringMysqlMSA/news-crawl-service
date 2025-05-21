@@ -10,7 +10,7 @@ import type { Page } from "puppeteer";
  */
 export async function extractNewsItemsFromList(
 	page: Page,
-	maxItems: number,
+	maxItems: number
 ): Promise<NewsItem[]> {
 	return page.evaluate((maxItems) => {
 		const newsItems: NewsItem[] = [];
@@ -23,7 +23,9 @@ export async function extractNewsItemsFromList(
 			const pressElement = element.querySelector(".info_group .press");
 			const timeElement = element.querySelector(".info_group .info");
 
-			if (!titleElement || !pressElement) continue;
+			if (!(titleElement && pressElement)) {
+				continue;
+			}
 
 			const title = titleElement.textContent?.trim() || "";
 			const url = titleElement.getAttribute("href") || "";
@@ -46,7 +48,7 @@ export async function extractNewsItemsFromList(
 				url,
 				press,
 				publishedAt,
-				summary,
+				description: summary,
 			});
 		}
 
@@ -59,41 +61,43 @@ export async function extractNewsItemsFromList(
  */
 export async function extractNewsItemsFromDetailFormat(
 	page: Page,
-	maxItems: number,
+	maxItems: number
 ): Promise<NewsItem[]> {
 	return page.evaluate((maxItems) => {
 		const newsItems: NewsItem[] = [];
 
 		// 뉴스 아이템 컨테이너 선택 - 사용자가 제공한 포맷
 		const newsElements = document.querySelectorAll(
-			".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2",
+			".sds-comps-vertical-layout.EPe0s1rCZZ86kDLT_SY2"
 		);
 
 		for (let i = 0; i < Math.min(newsElements.length, maxItems); i++) {
 			const element = newsElements[i];
 			const titleElement = element.querySelector(
-				".sds-comps-text-type-headline1",
+				".sds-comps-text-type-headline1"
 			);
 			const pressElement = element.querySelector(
-				".sds-comps-profile-info-title-text",
+				".sds-comps-profile-info-title-text"
 			);
 			const timeElement = element.querySelector(
-				".sds-comps-profile-info-subtext",
+				".sds-comps-profile-info-subtext"
 			);
 			const summaryElement = element.querySelector(
-				".sds-comps-text-ellipsis-3.sds-comps-text-type-body1",
+				".sds-comps-text-ellipsis-3.sds-comps-text-type-body1"
 			);
 
 			// URL 추출
 			let url = "";
 			const linkElement = element.querySelector(
-				"a.lu8Lfh20c9DvvP05mqBf.tym_MoKIfC84Aqvg9SKg",
+				"a.lu8Lfh20c9DvvP05mqBf.tym_MoKIfC84Aqvg9SKg"
 			);
 			if (linkElement) {
 				url = linkElement.getAttribute("href") || "";
 			}
 
-			if (!titleElement || !pressElement) continue;
+			if (!(titleElement && pressElement)) {
+				continue;
+			}
 
 			const title = titleElement.textContent?.trim() || "";
 			const press = pressElement.textContent?.trim() || "";
@@ -116,7 +120,7 @@ export async function extractNewsItemsFromDetailFormat(
 				url,
 				press,
 				publishedAt,
-				summary,
+				description: summary,
 			});
 		}
 

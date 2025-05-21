@@ -57,7 +57,7 @@ export class MetricsServer {
 		this.server = this.app.listen(port, () => {
 			logger.info(`Prometheus 지표 서버가 포트 ${port}에서 실행 중입니다.`);
 			logger.info(
-				`지표 엔드포인트: http://localhost:${port}${env.monitoring.path}`,
+				`지표 엔드포인트: http://localhost:${port}${env.monitoring.path}`
 			);
 		});
 

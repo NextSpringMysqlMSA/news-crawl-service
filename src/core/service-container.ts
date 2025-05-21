@@ -1,16 +1,19 @@
 import { env } from "@/config/env";
-import type { RetryOptions } from "@/crawlers/base-crawler";
+import type { RetryOptions } from "@/core/base-crawler";
 import { CrawlerCluster } from "@/crawlers/crawler-cluster";
 /**
  * 서비스 컨테이너 모듈
  * 애플리케이션의 의존성 주입을 관리합니다.
  */
-import { CrawlerRegistry } from "@/crawlers/crawler-registry";
-import { CrawlerService } from "@/crawlers/crawler-service";
-import { registerAllPlugins } from "@/plugins/register-plugins";
+import { CrawlerRegistry } from "@/core/crawler-registry";
+import { CrawlerService } from "@/core/crawler-service";
+import { registerPlugins } from "@/plugins/register-plugins";
+import { NewsSource } from "@/types";
 import { KafkaConsumerService } from "@/services/kafka-consumer";
 import { KafkaProducerService } from "@/services/kafka-producer";
 import { logger } from "@/utils/logger";
+import type { KafkaConfig, ProducerConfig, ConsumerConfig } from 'kafkajs';
+import type { Logger } from 'winston';
 
 /**
  * 서비스 컨테이너 옵션 인터페이스
@@ -35,7 +38,7 @@ export class ServiceContainer {
 	 * @returns ServiceContainer 싱글톤 인스턴스
 	 */
 	public static getInstance(
-		options?: ServiceContainerOptions,
+		options?: ServiceContainerOptions
 	): ServiceContainer {
 		if (!ServiceContainer.instance) {
 			ServiceContainer.instance = new ServiceContainer(options || {});
@@ -62,7 +65,6 @@ export class ServiceContainer {
 
 		if (!this.services.has(serviceKey)) {
 			const registry = CrawlerRegistry.getInstance();
-			registerAllPlugins(registry);
 			this.services.set(serviceKey, registry);
 		}
 
@@ -94,27 +96,14 @@ export class ServiceContainer {
 
 		if (!this.services.has(serviceKey)) {
 			const registry = this.getCrawlerRegistry();
-			const cluster = this.getCrawlerCluster();
 
 			const service = new CrawlerService(
-				registry,
-				cluster,
-				this.options.retryOptions,
+				registry
 			);
 
-			// 동시성 제한 설정 (옵션으로 제공된 경우)
 			if (this.options.concurrentLimit) {
 				service.setConcurrentLimit(this.options.concurrentLimit);
 			}
-
-			// 이벤트 리스너 설정
-			service.on(CrawlerService.EVENTS.INITIALIZED, () => {
-				logger.info("크롤러 서비스 초기화 이벤트 감지됨");
-			});
-
-			service.on(CrawlerService.EVENTS.CLOSED, () => {
-				logger.info("크롤러 서비스 종료 이벤트 감지됨");
-			});
 
 			this.services.set(serviceKey, service);
 		}
@@ -132,7 +121,7 @@ export class ServiceContainer {
 		if (!this.services.has(serviceKey)) {
 			this.services.set(
 				serviceKey,
-				new KafkaProducerService(env.kafka.resultTopic),
+				new KafkaProducerService(env.kafka.resultTopic)
 			);
 		}
 
@@ -152,7 +141,7 @@ export class ServiceContainer {
 
 			this.services.set(
 				serviceKey,
-				new KafkaConsumerService(crawlerService, producerService),
+				new KafkaConsumerService(crawlerService, producerService)
 			);
 		}
 
@@ -180,10 +169,16 @@ export class ServiceContainer {
 
 	/**
 	 * 컨테이너 초기화
-	 * 모든 서비스를 초기화합니다.
+	 * 모든 서비스를 초기화하고 플러그인을 등록합니다.
 	 */
 	public async initialize(): Promise<void> {
 		logger.info("서비스 컨테이너 초기화 중...");
+
+		// 크롤러 레지스트리 가져오기 및 플러그인 등록
+		const registry = this.getCrawlerRegistry();
+		// 등록할 기본 플러그인 목록
+		const sourcesToRegister = [NewsSource.NAVER, NewsSource.GOOGLE_NEWS];
+		await registerPlugins(registry, sourcesToRegister);
 
 		// 크롤러 서비스 초기화
 		const crawlerService = this.getCrawlerService();

@@ -1,5 +1,6 @@
 import { env } from "@/config/env";
 import type { CrawlOptions, SearchResult } from "@/types";
+import { ErrorType } from "@/types";
 import { logger } from "@/utils/logger";
 /**
  * 기본 크롤러 추상 클래스
@@ -7,7 +8,17 @@ import { logger } from "@/utils/logger";
  */
 import puppeteer from "puppeteer";
 import type { Browser, Page } from "puppeteer";
-import type { NewsCrawler } from "./crawler.interface";
+import type { NewsCrawler, CrawlerFactory } from "./crawler.interface";
+import { AxiosError } from "axios";
+import type { NewsItem } from "@/types";
+
+// RetryOptions 인터페이스 정의
+export interface RetryOptions {
+	maxRetries: number; // 최대 재시도 횟수
+	initialDelay: number; // 초기 지연 시간 (ms)
+	maxDelay: number; // 최대 지연 시간 (ms)
+	factor: number; // 지연 시간 증가 계수 (지수 백오프 시)
+}
 
 /**
  * 기본 크롤러 추상 클래스
@@ -106,7 +117,7 @@ export abstract class BaseCrawler implements NewsCrawler {
 	 */
 	public abstract searchNews(
 		keyword: string,
-		period: string,
-		options?: CrawlOptions,
+		period?: string,
+		options?: CrawlOptions
 	): Promise<SearchResult>;
 }

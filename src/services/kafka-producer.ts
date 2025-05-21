@@ -1,5 +1,5 @@
 import { env } from "@/config/env";
-import type { SearchResult } from "@/types";
+import type { SearchResult, DeadLetterQueueMessage } from "@/types";
 import { logger } from "@/utils/logger";
 /**
  * Kafka 프로듀서 서비스
@@ -17,12 +17,14 @@ export class KafkaProducerService {
 	private topic: string;
 	private isConnected = false;
 	private kafkaAvailable = true;
+	private deadLetterTopic: string;
 
 	/**
 	 * 생성자
 	 * @param topic - 메시지를 발행할 Kafka 토픽
+	 * @param deadLetterTopic - 데드 레터 메시지를 발행할 Kafka 토픽 (선택적)
 	 */
-	constructor(topic: string) {
+	constructor(topic: string, deadLetterTopic?: string) {
 		logger.debug(`Kafka 프로듀서 서비스 인스턴스 생성 (토픽: ${topic})`);
 
 		const kafka = new Kafka({
@@ -32,6 +34,7 @@ export class KafkaProducerService {
 
 		this.producer = kafka.producer();
 		this.topic = topic;
+		this.deadLetterTopic = deadLetterTopic || `${topic}.dead-letter`;
 	}
 
 	/**
@@ -54,7 +57,7 @@ export class KafkaProducerService {
 			this.kafkaAvailable = false;
 			logger.warn(
 				"Kafka 프로듀서 연결 실패, 메시지는 로컬에만 기록됩니다",
-				error,
+				error
 			);
 			return false;
 		}
@@ -85,7 +88,7 @@ export class KafkaProducerService {
 	 */
 	private logResultLocally(result: SearchResult): void {
 		logger.info(
-			`[로컬 로그] 검색 결과: 키워드 "${result.keyword}", 소스 ${result.source}, ${result.newsItems.length}개 항목`,
+			`[로컬 로그] 검색 결과: 키워드 "${result.keyword}", 소스 ${result.source}, ${result.newsItems.length}개 항목`
 		);
 	}
 
@@ -98,19 +101,35 @@ export class KafkaProducerService {
 		if (results.length > 0) {
 			for (const result of results) {
 				logger.debug(
-					`[로컬 로그] - 키워드: "${result.keyword}", 소스: ${result.source}, 항목 수: ${result.newsItems.length}`,
+					`[로컬 로그] - 키워드: "${result.keyword}", 소스: ${result.source}, 항목 수: ${result.newsItems.length}`
 				);
 			}
 		}
 	}
 
 	/**
-	 * Kafka 메시지 발행 시도
+	 * Dead Letter Queue 메시지 로컬 로깅
+	 * @param message - 로그에 기록할 DLQ 메시지
+	 */
+	private logDeadLetterLocally(message: DeadLetterQueueMessage): void {
+		logger.warn(
+			`[로컬 로그] DLQ 메시지: ID ${message.id}, 키워드 "${message.originalRequest.keyword}", 오류 유형 ${message.errorType}, 재시도 ${message.retryCount}/${message.maxRetries}`
+		);
+		logger.debug(`[로컬 로그] DLQ 오류 메시지: ${message.errorMessage}`);
+		if (message.stackTrace) {
+			logger.debug(`[로컬 로그] DLQ 스택 트레이스: ${message.stackTrace}`);
+		}
+	}
+
+	/**
+	 * 지정된 토픽으로 Kafka 메시지 발행 시도
+	 * @param topic - 메시지를 발행할 토픽
 	 * @param messages - 발행할 메시지 배열
 	 * @returns 발행 성공 여부
 	 */
-	private async tryPublish(
-		messages: Array<{ key: string; value: string }>,
+	private async tryPublishToTopic(
+		topic: string,
+		messages: Array<{ key: string; value: string }>
 	): Promise<boolean> {
 		if (!this.kafkaAvailable) {
 			return false;
@@ -125,15 +144,26 @@ export class KafkaProducerService {
 
 		try {
 			await this.producer.send({
-				topic: this.topic,
+				topic,
 				messages,
 			});
 			return true;
 		} catch (error) {
 			this.kafkaAvailable = false;
-			logger.warn("Kafka 연결 문제로 메시지 발행 실패", error);
+			logger.warn(`Kafka 연결 문제로 토픽 ${topic}에 메시지 발행 실패`, error);
 			return false;
 		}
+	}
+
+	/**
+	 * Kafka 메시지 발행 시도 (기본 토픽)
+	 * @param messages - 발행할 메시지 배열
+	 * @returns 발행 성공 여부
+	 */
+	private async tryPublish(
+		messages: Array<{ key: string; value: string }>
+	): Promise<boolean> {
+		return this.tryPublishToTopic(this.topic, messages);
 	}
 
 	/**
@@ -142,11 +172,11 @@ export class KafkaProducerService {
 	 */
 	async publishResult(result: SearchResult): Promise<void> {
 		logger.debug(
-			`검색 결과 발행 시도: 키워드 "${result.keyword}", 소스 ${result.source}, ${result.newsItems.length}개 항목`,
+			`검색 결과 발행 시도: 키워드 "${result.keyword}", 소스 ${result.source}, ${result.newsItems.length}개 항목`
 		);
 
 		const message = {
-			key: `${result.keyword}-${result.source}-${result.period}`,
+			key: `${result.keyword}-${result.source}`,
 			value: JSON.stringify(result),
 		};
 
@@ -154,7 +184,7 @@ export class KafkaProducerService {
 
 		if (success) {
 			logger.debug(
-				`검색 결과 발행 완료: 키워드 "${result.keyword}", 소스 ${result.source}`,
+				`검색 결과 발행 완료: 키워드 "${result.keyword}", 소스 ${result.source}`
 			);
 		} else {
 			this.logResultLocally(result);
@@ -173,7 +203,7 @@ export class KafkaProducerService {
 		logger.debug(`배치 검색 결과 발행 시도: ${results.length}개 항목`);
 
 		const messages = results.map((result) => ({
-			key: `${result.keyword}-${result.source}-${result.period}`,
+			key: `${result.keyword}-${result.source}`,
 			value: JSON.stringify(result),
 		}));
 
@@ -184,6 +214,35 @@ export class KafkaProducerService {
 		} else {
 			this.logResultsLocally(results);
 		}
+	}
+
+	/**
+	 * Dead Letter Queue 메시지를 전용 토픽에 발행
+	 * @param message - 발행할 DLQ 메시지
+	 * @returns 발행 성공 여부
+	 */
+	async publishDeadLetterMessage(message: DeadLetterQueueMessage): Promise<boolean> {
+		logger.debug(
+			`DLQ 메시지 발행 시도: ID ${message.id}, 키워드 "${message.originalRequest.keyword}", 오류 유형 ${message.errorType}`
+		);
+
+		const kafkaMessage = {
+			key: message.id,
+			value: JSON.stringify(message),
+		};
+
+		const success = await this.tryPublishToTopic(this.deadLetterTopic, [kafkaMessage]);
+
+		if (success) {
+			logger.info(
+				`DLQ 메시지 발행 완료 (토픽: ${this.deadLetterTopic}): ID ${message.id}, 키워드 "${message.originalRequest.keyword}"`
+			);
+		} else {
+			this.logDeadLetterLocally(message);
+			logger.warn(`DLQ 메시지 발행 실패, 로컬에만 기록됨: ID ${message.id}`);
+		}
+
+		return success;
 	}
 
 	/**

@@ -83,7 +83,7 @@ async function main() {
 			} catch (error) {
 				logger.warn(
 					"모니터링 서버 시작 실패, 모니터링 없이 계속됩니다.",
-					error,
+					error
 				);
 			}
 		}

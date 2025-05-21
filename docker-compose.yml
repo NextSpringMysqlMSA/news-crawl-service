@@ -1,27 +1,63 @@
 version: '3.8'
 
 services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - external-network
+    # ports: # 호스트에서 Zookeeper 접근이 필요하다면 주석 해제
+      # - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "19092:19092" # 호스트에서 Kafka 접근을 위해 19092 포트 사용
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      # KAFKA_CREATE_TOPICS: "news-keywords:1:1,news-results:1:1,esg-analysis-results:1:1" # news-crawler에서 생성
+    networks:
+      - external-network
+
   # 크롤링 서비스
   news-crawler:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: news-crawler
+    depends_on: # Kafka가 실행된 후 news-crawler 시작
+      - kafka
     environment:
-      KAFKA_BROKERS: ${KAFKA_HOST:-kafka}:9092
+      KAFKA_BROKERS: kafka:9092 # 내부 통신 시 kafka:9092 사용
       KAFKA_TOPIC: news-keywords
       KAFKA_GROUP_ID: news-crawler-group
       KAFKA_RESULT_TOPIC: news-results
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" 
+      KAFKA_CREATE_TOPICS: "news-keywords:1:1,news-results:1:1" 
       CRAWLER_HEADLESS: 'true'
       CRAWLER_CONCURRENT_LIMIT: '5'
       MONITORING_ENABLED: 'true'
       MONITORING_PORT: '9464'
+      NAVER_CLIENT_ID: "OJI4aMzRQF8jx894H33I"
+      NAVER_CLIENT_SECRET: "pN_eJjKoMR"
     ports:
-      - "9464:9464" # 모니터링 포트
+      - "9464:9464"
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
-    # 컨테이너의 메모리 사용량 제한
     deploy:
       resources:
         limits:
@@ -31,7 +67,38 @@ services:
     networks:
       - external-network
 
+  # ESG 뉴스 분석 서비스
+  esg-news-analyzer:
+    build:
+      context: ./ESG-NewsAnalysis
+      dockerfile: Dockerfile
+    container_name: esg-news-analyzer
+    depends_on: 
+      - kafka
+      - news-crawler
+    environment:
+      KAFKA_BROKERS: kafka:9092 # 내부 통신 시 kafka:9092 사용
+      KAFKA_CONSUME_TOPIC: news-results 
+      KAFKA_PRODUCE_TOPIC: esg-analysis-results
+      KAFKA_GROUP_ID: esg-analysis-group
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" 
+      KAFKA_CREATE_TOPICS: "esg-analysis-results:1:1" 
+      TRANSFORMERS_CACHE: /app/.cache/huggingface/transformers
+      HF_HOME: /app/.cache/huggingface
+      LOG_LEVEL: INFO
+    volumes:
+      - ./ESG-NewsAnalysis/logs:/app/logs 
+      # - ./ESG-NewsAnalysis/.cache:/app/.cache 
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G 
+        reservations:
+          memory: 2G
+    networks:
+      - external-network
+
 networks:
   external-network:
-    external: true
-    name: nsmm-network
+    name: news-analysis-network

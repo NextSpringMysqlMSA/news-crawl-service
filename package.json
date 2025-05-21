@@ -5,11 +5,12 @@
 	"main": "dist/index.js",
 	"scripts": {
 		"start": "node dist/index.js",
-		"dev": "ts-node -r tsconfig-paths/register src/index.ts",
-		"build": "tsc",
-		"test-crawler": "ts-node -r tsconfig-paths/register src/test-crawler.ts",
+		"dev": "NODE_ENV=development ts-node -r tsconfig-paths/register src/index.ts",
+		"build": "tsc && node -e \"console.log('Build completed.')\"",
+		"local-test": "npm run build && NODE_ENV=development node dist/local-test-crawler.js",
 		"test": "echo \"Error: no test specified\" && exit 1",
-		"docs": "typedoc --out docs src"
+		"docs": "typedoc --out docs src",
+		"dlq": "ts-node -r tsconfig-paths/register src/scripts/dlq-cli.ts"
 	},
 	"_moduleAliases": {
 		"@": "dist"
@@ -21,6 +22,7 @@
 	"dependencies": {
 		"@types/module-alias": "^2.0.4",
 		"axios": "^1.9.0",
+		"commander": "^10.0.1",
 		"dotenv": "^16.5.0",
 		"express": "^4.19.2",
 		"kafkajs": "^2.2.4",

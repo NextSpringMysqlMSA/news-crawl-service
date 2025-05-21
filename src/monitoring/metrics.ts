@@ -94,7 +94,7 @@ export function recordCrawlingStart(source: string): void {
 export function recordCrawlingSuccess(
 	source: string,
 	durationSeconds: number,
-	itemCount: number,
+	itemCount: number
 ): void {
 	activeJobsGauge.dec({ source });
 	crawlingRequestCounter.inc({ source, status: "success" });
@@ -109,7 +109,7 @@ export function recordCrawlingSuccess(
  */
 export function recordCrawlingFailure(
 	source: string,
-	durationSeconds: number,
+	durationSeconds: number
 ): void {
 	activeJobsGauge.dec({ source });
 	crawlingRequestCounter.inc({ source, status: "failure" });
@@ -125,7 +125,7 @@ export function recordCrawlingFailure(
 export function recordMemoryUsage(
 	source: string,
 	heapUsedMB: number,
-	heapTotalMB: number,
+	heapTotalMB: number
 ): void {
 	memoryHeapUsedGauge.set({ source }, heapUsedMB);
 	memoryHeapTotalGauge.set({ source }, heapTotalMB);

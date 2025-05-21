@@ -10,7 +10,7 @@ const logFormat = winston.format.combine(
 	winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
 	winston.format.errors({ stack: true }),
 	winston.format.splat(),
-	winston.format.json(),
+	winston.format.json()
 );
 
 // 콘솔 출력 포맷 정의
@@ -25,7 +25,7 @@ const consoleFormat = winston.format.combine(
 			metaStr = `\n${JSON.stringify(metadata, null, 2)}`;
 		}
 		return `${timestamp} [${level}]: ${message}${metaStr}`;
-	}),
+	})
 );
 
 // 로그 레벨 정의
@@ -56,7 +56,7 @@ export function createLogger(serviceName: string) {
 			// 콘솔 출력 설정
 			new winston.transports.Console({
 				format: consoleFormat,
-				level: process.env.NODE_ENV === "production" ? "info" : "debug",
+				level: "debug",
 			}),
 		],
 	});
