@@ -188,7 +188,7 @@ export class CrawlerService {
 		const results = await Promise.all(searchPromises);
 
 		const totalNewsItems = results.reduce(
-			(sum, result) => sum + result.newsItems.length,
+			(sum: number, result: SearchResult) => sum + result.newsItems.length,
 			0
 		);
 		logger.info(
@@ -206,14 +206,20 @@ export class CrawlerService {
 	public async processCrawlRequest(
 		request: CrawlRequest
 	): Promise<SearchResult[]> {
-		const { keyword, periods, sources } = request;
+		const { keyword, periods, sources, partner_id, corp_code } = request;
 		const periodToUse = periods && periods.length > 0 ? periods[0] : undefined;
 
 		logger.info(
-			`크롤링 요청 처리: 키워드="${keyword}", 기간=${periodToUse || '전체'}, 소스=${sources?.join(",") || "all"}`
+			`크롤링 요청 처리: 키워드="${keyword}", 기간=${periodToUse || '전체'}, 소스=${sources?.join(",") || "all"}, 파트너ID=${partner_id || 'N/A'}`
 		);
 
-		return this.searchNews(keyword, periodToUse, sources, {});
+		const results = await this.searchNews(keyword, periodToUse, sources, {});
+		
+		return results.map(result => ({
+			...result,
+			partner_id,
+			corp_code
+		}));
 	}
 
 	/**

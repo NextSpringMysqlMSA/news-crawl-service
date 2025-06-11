@@ -20,6 +20,10 @@ export interface SearchResult {
 	newsItems: NewsItem[]; // 검색된 뉴스 아이템 목록
 	source: string; // 뉴스 소스 (naver, google-news 등)
 	error?: string; // 오류 발생 시 메시지 (선택적)
+	
+	// 파트너사 관련 추가 필드들 (선택적)
+	partner_id?: string; // 파트너사 ID (추적용)
+	corp_code?: string; // DART 기업 고유번호
 }
 
 // 크롤링 요청 타입
@@ -27,6 +31,11 @@ export interface CrawlRequest {
 	keyword: string; // 검색할 키워드
 	periods: string[]; // 검색 기간 목록 (1w, 1m, all 등)
 	sources?: string[]; // 크롤링할 뉴스 소스 (미지정 시 모든 소스)
+	
+	// 파트너사 관련 추가 필드들 (선택적)
+	partner_id?: string; // 파트너사 ID (추적용)
+	corp_code?: string; // DART 기업 고유번호
+	requested_at?: string; // 요청 시간
 }
 
 /**
@@ -66,8 +75,12 @@ export class CrawlerError extends Error {
 		this.keyword = keyword;
 		this.errorType = errorType;
 
-		if (Error.captureStackTrace) {
-			Error.captureStackTrace(this, CrawlerError);
+		// Node.js 환경에서만 사용 가능한 captureStackTrace
+		const errorWithCapture = Error as unknown as { 
+			captureStackTrace?: (targetObject: object, constructorOpt: object) => void 
+		};
+		if (errorWithCapture.captureStackTrace) {
+			errorWithCapture.captureStackTrace(this, CrawlerError);
 		}
 	}
 }
